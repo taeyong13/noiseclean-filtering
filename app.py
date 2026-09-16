@@ -54,7 +54,10 @@ def inject_css() -> None:
           }
           /* Streamlit reserves top space for the (hidden) header inside the sidebar by default,
              which pushes all sidebar content down. Strip that out and set a small, deliberate gap instead. */
-          [data-testid="stSidebar"] > div:first-child { background: transparent; padding-top: 0 !important; }
+          [data-testid="stSidebar"] > div:first-child {
+            background: transparent; padding-top: 0 !important; height: 100vh !important;
+            overflow-y: auto !important; overscroll-behavior: contain;
+          }
           [data-testid="stSidebarUserContent"] { padding-top: 1rem !important; }
           [data-testid="stSidebarUserContent"] > div:first-child { margin-top: 0 !important; padding-top: 0 !important; }
           [data-testid="stSidebarHeader"] { display: none; }
@@ -63,6 +66,8 @@ def inject_css() -> None:
           [data-testid="stSidebar"] label, [data-testid="stSidebar"] .stCaption { color: #0f172a !important; }
           [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color: #1e293b !important; }
           [data-testid="stSidebar"] hr { border-color: rgba(148, 163, 184, .35); }
+          .control-title { margin: 1.1rem 0 .15rem; color: #64748b; font-size: .70rem;
+                           font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 
           /* ---------- Streamlit input widgets, glassed to match ---------- */
           [data-baseweb="select"] > div, .stNumberInput input, .stTextInput input,
@@ -322,6 +327,7 @@ st.markdown(
 with st.sidebar:
     st.header("Control Lab")
     st.caption("Atur sumber sinyal, noise, dan metode penyaringan.")
+    st.markdown('<div class="control-title">Sinyal input</div>', unsafe_allow_html=True)
     source = st.radio("Sumber sinyal", ["Sinyal sintetis", "Unggah WAV"])
     uploaded = None
     if source == "Sinyal sintetis":
@@ -332,7 +338,7 @@ with st.sidebar:
         uploaded = st.file_uploader("File audio WAV", type=["wav"])
         sample_rate, duration, frequency = 16000, 3.0, 440
 
-    st.divider()
+    st.markdown('<div class="control-title">Noise dan filter</div>', unsafe_allow_html=True)
     noise_percent = st.slider("Level noise (% RMS sinyal)", 0, 100, 30, 1)
     random_seed = st.number_input("Seed noise (hasil konsisten)", min_value=0, value=6, step=1)
     method = st.selectbox(
