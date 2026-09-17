@@ -7,7 +7,7 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 from scipy.io import wavfile
-from scipy.signal import cheby1, medfilt, sosfiltfilt, wiener
+from scipy.signal import wiener
 
 
 st.set_page_config(page_title="NoiseClean | PSD", page_icon="N", layout="wide")
@@ -215,28 +215,9 @@ def add_awgn(clean: np.ndarray, noise_percent: float, seed: int) -> np.ndarray:
     return np.clip(clean + noise, -1.0, 1.0)
 
 
-def apply_filter(
-    signal: np.ndarray,
-    sample_rate: int,
-    method: str,
-    cutoff: int | None = None,
-    order: int = 6,
-    ripple: float = 1.0,
-    window: int = 11,
-) -> np.ndarray:
-    """Apply the selected noise-reduction method to one mono audio signal."""
-    if method == "Wiener Filter":
-        return wiener(signal, mysize=window)
-    if method == "Moving Average":
-        kernel = np.ones(window, dtype=float) / window
-        return np.convolve(signal, kernel, mode="same")
-    if method == "Median Filter":
-        return medfilt(signal, kernel_size=window)
-    if cutoff is None:
-        raise ValueError("Cutoff frequency is required for Chebyshev Type I.")
-    cutoff = min(cutoff, int(sample_rate / 2 - 1))
-    sos = cheby1(order, ripple, cutoff, btype="lowpass", fs=sample_rate, output="sos")
-    return sosfiltfilt(sos, signal)
+def apply_wiener_filter(signal: np.ndarray, window: int) -> np.ndarray:
+    """Reduce local noise with a Wiener filter using an odd-sized sample window."""
+    return wiener(signal, mysize=window)
 
 
 def snr_db(reference: np.ndarray, tested: np.ndarray) -> float:
@@ -341,21 +322,9 @@ with st.sidebar:
     st.markdown('<div class="control-title">Noise dan filter</div>', unsafe_allow_html=True)
     noise_percent = st.slider("Level noise (% RMS sinyal)", 0, 100, 30, 1)
     random_seed = st.number_input("Seed noise (hasil konsisten)", min_value=0, value=6, step=1)
-    method = st.selectbox(
-        "Metode filtering",
-        ["Wiener Filter", "Chebyshev Type I", "Moving Average", "Median Filter"],
-        help="Wiener dan Chebyshev Type I adalah metode utama proyek; dua lainnya digunakan sebagai pembanding.",
-    )
-    cutoff, order, ripple, window = None, 6, 1.0, 11
-    if method == "Chebyshev Type I":
-        cutoff = st.slider("Cutoff frequency (Hz)", 100, 7000, 1500, 100)
-        order = st.slider("Orde filter", 2, 10, 6, 1)
-        ripple = st.slider("Passband ripple (dB)", 0.1, 3.0, 1.0, 0.1)
-        st.caption("Cutoff menentukan batas frekuensi; ripple adalah variasi amplitudo yang diizinkan di passband.")
-    else:
-        window = st.slider("Ukuran jendela (ganjil)", 3, 101, 11, 2)
-        if method == "Wiener Filter":
-            st.caption("Wiener mengestimasi noise secara lokal. Jendela lebih besar memberi penghalusan lebih kuat.")
+    st.markdown('<div class="control-title">Wiener Filter</div>', unsafe_allow_html=True)
+    window = st.slider("Ukuran jendela Wiener (ganjil)", 3, 101, 11, 2)
+    st.caption("Wiener Filter mengestimasi noise secara lokal. Jendela lebih besar memberi penghalusan lebih kuat.")
     
 try:
     if source == "Unggah WAV":
@@ -374,14 +343,8 @@ try:
     if clean_signal.size < 50:
         st.error("Sinyal terlalu pendek untuk diproses.")
         st.stop()
-    if method == "Chebyshev Type I" and cutoff is not None and cutoff >= sample_rate / 2:
-        st.error(f"Cutoff harus lebih kecil dari frekuensi Nyquist ({sample_rate / 2:.0f} Hz).")
-        st.stop()
-
     noisy_signal = add_awgn(clean_signal, noise_percent, int(random_seed))
-    filtered_signal = apply_filter(
-        noisy_signal, sample_rate, method, cutoff=cutoff, order=order, ripple=ripple, window=window
-    )
+    filtered_signal = apply_wiener_filter(noisy_signal, window)
 
     before = snr_db(clean_signal, noisy_signal)
     after = snr_db(clean_signal, filtered_signal)
@@ -400,19 +363,16 @@ try:
     assessment = "meningkatkan" if gain >= 0 else "menurunkan"
     accent = "baik" if gain >= 3 else "masih dapat dioptimalkan"
     st.markdown(
-        f"""<div class="insight"><strong>Ringkasan hasil.</strong> {method} {assessment} SNR sebesar <strong>{abs(gain):.2f} dB</strong>. """
+        f"""<div class="insight"><strong>Ringkasan hasil Wiener Filter.</strong> Filter {assessment} SNR sebesar <strong>{abs(gain):.2f} dB</strong>. """
         f"Nilai SNR naik berarti keluaran filter lebih mendekati sinyal awal; nilai RMSE membantu memastikan detail sinyal tidak terlalu berubah.</div>""",
         unsafe_allow_html=True,
     )
 
     source_name = "Sinyal sintetis" if source == "Sinyal sintetis" else "Audio WAV"
-    if method == "Chebyshev Type I":
-        window_text = f"Cutoff {cutoff:,} Hz · orde {order} · ripple {ripple:.1f} dB"
-    else:
-        window_text = f"Jendela {window} sampel"
+    window_text = f"Jendela {window} sampel"
     st.markdown(
         f"""<div class="experiment-strip"><strong>Eksperimen aktif</strong> &nbsp; {source_name} · {sample_rate:,} Hz · {clean_signal.size / sample_rate:.1f} detik
-        &nbsp; | &nbsp; Noise putih {noise_percent}% RMS &nbsp; | &nbsp; {method} ({window_text})</div>""",
+        &nbsp; | &nbsp; Noise putih {noise_percent}% RMS &nbsp; | &nbsp; Wiener Filter ({window_text})</div>""",
         unsafe_allow_html=True,
     )
 
@@ -453,22 +413,12 @@ try:
             file_name="noiseclean_filtered.wav", mime="audio/wav",
         )
     with tab3:
-        st.subheader(method)
-        if method == "Wiener Filter":
-            st.latex(r"\hat{X}(f) = \frac{S_{xx}(f)}{S_{xx}(f) + S_{nn}(f)}Y(f)")
-            st.write("Wiener Filter mengestimasi sinyal bersih dari sinyal ber-noise dengan meminimalkan mean square error (MSE). Pada aplikasi ini, estimasi dilakukan secara lokal menggunakan ukuran jendela yang dipilih.")
-        elif method == "Chebyshev Type I":
-            st.latex(r"|H(j\omega)|^2 = \frac{1}{1 + \epsilon^2 T_n^2(\omega / \omega_c)}")
-            st.write("Chebyshev Type I adalah filter IIR dengan transisi cutoff lebih tajam daripada Butterworth. Konsekuensinya, terdapat ripple yang terkontrol pada passband. Cocok untuk meredam noise frekuensi tinggi dengan batas cutoff yang tegas.")
-        elif method == "Moving Average":
-            st.latex(r"y[n] = \\frac{1}{M} \\sum_{k=0}^{M-1} x[n-k]")
-            st.write("Filter FIR sederhana sebagai pembanding. Setiap sampel diganti dengan rata-rata M sampel di sekitarnya.")
-        else:
-            st.latex(r"y[n] = \\operatorname{median}\\{x[n-k], \\ldots, x[n+k]\\}")
-            st.write("Median Filter digunakan sebagai pembanding untuk noise impulsif; metode ini memilih nilai tengah dalam jendela lokal.")
-        st.info("Untuk eksperimen yang adil, pertahankan seed noise yang sama saat mengganti metode atau parameter.")
+        st.subheader("Wiener Filter")
+        st.latex(r"\hat{X}(f) = \frac{S_{xx}(f)}{S_{xx}(f) + S_{nn}(f)}Y(f)")
+        st.write("Wiener Filter mengestimasi sinyal bersih dari sinyal ber-noise dengan meminimalkan mean square error (MSE). Pada aplikasi ini, estimasi dilakukan secara lokal menggunakan ukuran jendela yang dipilih.")
+        st.info("Untuk eksperimen yang adil, pertahankan seed noise yang sama saat mengganti level noise atau ukuran jendela.")
         st.markdown("#### Cara membaca hasil")
-        st.markdown("- **Domain waktu:** lihat apakah garis hijau mengikuti garis biru dan menjauh dari garis merah.\n- **Spektrum frekuensi:** noise biasanya menaikkan energi di banyak frekuensi; filter yang efektif menekan komponen yang tidak diinginkan.\n- **SNR dan RMSE:** bandingkan angka antar-konfigurasi untuk memilih parameter terbaik.")
+        st.markdown("- **Domain waktu:** lihat apakah garis hijau mengikuti garis biru dan menjauh dari garis merah.\n- **Spektrum frekuensi:** noise biasanya menaikkan energi di banyak frekuensi; Wiener Filter menekan komponen noise berdasarkan estimasi lokal.\n- **SNR dan RMSE:** ubah level noise atau ukuran jendela, lalu bandingkan hasil antar-pengujian.")
 except Exception as error:
     st.error(f"Tidak dapat memproses sinyal: {error}")
     st.exception(error)
