@@ -1,10 +1,8 @@
 # NoiseClean - Filtering / Noise Reduction
 
-Aplikasi interaktif untuk demonstrasi pengurangan noise pada sinyal audio. Aplikasi dapat membuat sinyal uji atau membaca file WAV, menambahkan white Gaussian noise, lalu membandingkan hasil tiga metode filter:
+Aplikasi interaktif untuk demonstrasi pengurangan noise pada sinyal audio menggunakan Wiener Filter. Aplikasi dapat membuat sinyal uji atau membaca file WAV, menambahkan white Gaussian noise, lalu membandingkan sinyal awal, sinyal ber-noise, dan hasil Wiener Filter.
 
-- Wiener Filter (metode utama)
-- Chebyshev Type I Low-pass Filter (metode utama)
-- Moving Average dan Median Filter (metode pembanding)
+- Wiener Filter
 
 ## Menjalankan aplikasi
 
