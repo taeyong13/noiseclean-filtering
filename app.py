@@ -1,9 +1,4 @@
-"""NoiseClean: aplikasi demonstrasi filtering / noise reduction untuk tugas PSD.
-
-Versi 2 - Wiener Filter domain frekuensi (STFT) agar SNR setelah filter >= 35 dB
-pada noise 10 % RMS (target dosen). Wiener lokal (scipy.signal.wiener) tetap
-tersedia sebagai pembanding / baseline.
-"""
+"""NoiseClean: aplikasi demonstrasi filtering / noise reduction untuk tugas PSD."""
 
 from io import BytesIO
 import wave
@@ -12,10 +7,8 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 from scipy.io import wavfile
-from scipy.signal import istft, stft, wiener
+from scipy.signal import wiener
 
-TARGET_SNR_DB = 35.0      # target dari dosen: SNR setelah filter minimal 35 dB
-TARGET_NOISE_PCT = 10     # ... pada level noise minimal 10 % RMS
 
 st.set_page_config(page_title="NoiseClean | PSD", page_icon="N", layout="wide")
 
@@ -59,6 +52,8 @@ def inject_css() -> None:
             backdrop-filter: blur(22px) saturate(160%);
             -webkit-backdrop-filter: blur(22px) saturate(160%);
           }
+          /* Streamlit reserves top space for the (hidden) header inside the sidebar by default,
+             which pushes all sidebar content down. Strip that out and set a small, deliberate gap instead. */
           [data-testid="stSidebar"] > div:first-child {
             background: transparent; padding-top: 0 !important; height: 100vh !important;
             overflow-y: auto !important; overscroll-behavior: contain;
@@ -95,7 +90,7 @@ def inject_css() -> None:
           [data-testid="stFileUploaderDropzoneInstructions"] span,
           [data-testid="stFileUploaderDropzoneInstructions"] small { color: #475569 !important; }
 
-          /* ---------- Buttons: gradient pill ---------- */
+          /* ---------- Buttons: gradient pill, matches hero-tag/CTA in reference ---------- */
           .stButton > button, .stDownloadButton > button {
             background: linear-gradient(135deg, #7c6cff, #a855f7) !important;
             color: #fff !important;
@@ -146,10 +141,6 @@ def inject_css() -> None:
           .experiment-strip strong { color: #5145cd; }
           .insight { padding: .9rem 1rem; color: #155e75; margin: .9rem 0 1rem;
                      background: rgba(214, 255, 244, .5) !important; }
-          .target-ok   { padding: .8rem 1rem; margin: .2rem 0 1rem; color: #065f46; font-size: .9rem;
-                         background: rgba(167, 243, 208, .55) !important; }
-          .target-warn { padding: .8rem 1rem; margin: .2rem 0 1rem; color: #92400e; font-size: .9rem;
-                         background: rgba(253, 230, 138, .55) !important; }
 
           /* ---------- Metric cards ---------- */
           .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin: 0 0 1rem; }
@@ -159,7 +150,6 @@ def inject_css() -> None:
           .metric-value { color: #172554; font-size: 1.55rem; line-height: 1.25; margin: .45rem 0 .3rem; font-weight: 780; letter-spacing: -.4px; }
           .metric-note { color: #64748b; font-size: .74rem; line-height: 1.32; }
           .metric-positive { display: inline-block; color: #047857; background: rgba(16,185,129,.16); border-radius: 999px; padding: .18rem .45rem; font-size: .72rem; font-weight: 750; }
-          .metric-negative { display: inline-block; color: #b91c1c; background: rgba(248,113,113,.18); border-radius: 999px; padding: .18rem .45rem; font-size: .72rem; font-weight: 750; }
 
           .section-title { color: #0f172a; font-size: 1.15rem; font-weight: 750; margin: .9rem 0 .15rem; }
           .section-subtitle { color: #64748b; font-size: .88rem; margin-bottom: .65rem; }
@@ -188,18 +178,13 @@ def inject_css() -> None:
     )
 
 
-# --------------------------------------------------------------------------- #
-#  Pemrosesan sinyal
-# --------------------------------------------------------------------------- #
 def to_float_audio(samples: np.ndarray) -> np.ndarray:
     """Normalise common WAV integer/float types to a mono float signal in [-1, 1]."""
     raw = np.asarray(samples)
     # Normalisasi HARUS dilakukan sebelum audio stereo dirata-ratakan.
     # Jika dirata-ratakan lebih dulu, dtype integer berubah menjadi float dengan
     # nilai PCM mentah (mis. ±32768) dan SNR akan salah terbaca sekitar 0 dB.
-    if raw.dtype == np.uint8:  # WAV 8-bit bersifat unsigned, titik nol = 128
-        values = (raw.astype(np.float64) - 128.0) / 128.0
-    elif np.issubdtype(raw.dtype, np.integer):
+    if np.issubdtype(raw.dtype, np.integer):
         scale = max(abs(np.iinfo(raw.dtype).min), np.iinfo(raw.dtype).max)
         values = raw.astype(np.float64) / scale
     else:
@@ -221,31 +206,6 @@ def make_test_signal(sample_rate: int, duration: float, frequency: float) -> np.
     return signal / np.max(np.abs(signal)) * 0.8
 
 
-SAMPLE_KINDS = {
-    "Flute (nada tunggal + vibrato)": "flute",
-    "Organ (akor C-E-G)": "organ",
-    "Dial tone (dua nada 697 + 1209 Hz)": "dial",
-}
-
-
-def make_sample_audio(kind: str, sample_rate: int, duration: float = 5.0) -> np.ndarray:
-    """Contoh audio tonal (sustain) yang cocok didemokan dengan Wiener Filter."""
-    t = np.arange(int(sample_rate * duration)) / sample_rate
-    if kind == "flute":
-        vibrato = 1 + 0.004 * np.sin(2 * np.pi * 5 * t)
-        phase = 2 * np.pi * np.cumsum(880 * vibrato) / sample_rate
-        x = np.sin(phase) + 0.25 * np.sin(2 * phase) + 0.08 * np.sin(3 * phase)
-    elif kind == "organ":
-        x = sum(
-            sum((1 / h) * np.sin(2 * np.pi * f * h * t) for h in range(1, 5))
-            for f in (261.63, 329.63, 392.0)
-        )
-        x = x * np.minimum(t / 0.05, 1) * np.minimum((duration - t) / 0.1, 1)
-    else:  # dial tone
-        x = np.sin(2 * np.pi * 697 * t) + np.sin(2 * np.pi * 1209 * t)
-    return x / np.max(np.abs(x)) * 0.8
-
-
 def add_awgn(clean: np.ndarray, noise_percent: float, seed: int) -> np.ndarray:
     if noise_percent == 0:
         return clean.copy()
@@ -255,47 +215,9 @@ def add_awgn(clean: np.ndarray, noise_percent: float, seed: int) -> np.ndarray:
     return np.clip(clean + noise, -1.0, 1.0)
 
 
-def apply_wiener_local(signal: np.ndarray, window: int) -> np.ndarray:
-    """Wiener lokal (domain waktu) - baseline. Batas praktisnya sekitar 26 dB pada noise 10 %."""
+def apply_wiener_filter(signal: np.ndarray, window: int) -> np.ndarray:
+    """Reduce local noise with a Wiener filter using an odd-sized sample window."""
     return wiener(signal, mysize=window)
-
-
-def estimate_noise_psd(power: np.ndarray) -> float:
-    """Estimasi PSD noise putih dari spektrogram daya.
-
-    Median per-bin sepanjang waktu tahan terhadap nada (nada hanya menempati sedikit
-    bin/frame). Median distribusi eksponensial = rata-rata * ln2, sehingga dibagi ln2.
-    Persentil rendah antar-frekuensi menghindari bias dari bin yang berisi sinyal.
-    """
-    per_bin = np.median(power, axis=1) / np.log(2)
-    return float(np.percentile(per_bin, 40))
-
-
-def apply_wiener_stft(signal: np.ndarray, sample_rate: int, nperseg: int, alpha: float) -> np.ndarray:
-    """Wiener Filter domain frekuensi (STFT) dengan a-priori SNR 'decision-directed'.
-
-    H(f,t) = xi / (1 + xi),  xi = a-priori SNR = P_sinyal / P_noise
-    Y_hat(f,t) = H(f,t) * Y(f,t)  ->  ISTFT  ->  sinyal terestimasi
-    """
-    frame = int(min(nperseg, 2 ** int(np.floor(np.log2(max(signal.size, 64))))))
-    overlap = frame * 3 // 4
-    _, _, spec = stft(signal, fs=sample_rate, window="hann", nperseg=frame, noverlap=overlap)
-    power = np.abs(spec) ** 2
-    noise_psd = max(estimate_noise_psd(power), 1e-20)
-
-    result = np.empty_like(spec)
-    previous = np.maximum(power[:, 0] - noise_psd, 0.0)
-    for k in range(spec.shape[1]):
-        prior_snr = alpha * previous / noise_psd + (1 - alpha) * np.maximum(power[:, k] / noise_psd - 1, 0.0)
-        gain = prior_snr / (1 + prior_snr)
-        result[:, k] = gain * spec[:, k]
-        previous = np.abs(result[:, k]) ** 2
-
-    _, filtered = istft(result, fs=sample_rate, window="hann", nperseg=frame, noverlap=overlap)
-    filtered = filtered[: signal.size]
-    if filtered.size < signal.size:
-        filtered = np.pad(filtered, (0, signal.size - filtered.size))
-    return filtered
 
 
 def snr_db(reference: np.ndarray, tested: np.ndarray) -> float:
@@ -314,14 +236,11 @@ def wav_bytes(signal: np.ndarray, sample_rate: int) -> bytes:
     with wave.open(buffer, "wb") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)
-        wav.setframerate(int(sample_rate))
+        wav.setframerate(sample_rate)
         wav.writeframes(pcm.tobytes())
     return buffer.getvalue()
 
 
-# --------------------------------------------------------------------------- #
-#  Grafik
-# --------------------------------------------------------------------------- #
 def plot_waveforms(clean: np.ndarray, noisy: np.ndarray, filtered: np.ndarray, sample_rate: int) -> go.Figure:
     max_points = min(clean.size, int(sample_rate * 0.025))
     time_ms = np.arange(max_points) / sample_rate * 1000
@@ -365,24 +284,20 @@ def plot_spectrum(clean: np.ndarray, noisy: np.ndarray, filtered: np.ndarray, sa
 
 
 def plot_quality_comparison(before: float, after: float) -> go.Figure:
-    """Perbandingan SNR sebelum/sesudah filter, lengkap dengan garis target dosen."""
+    """Compact chart that makes the filter's measurable improvement easy to explain."""
     values = [before, after]
     improvement = after - before
     figure = go.Figure(go.Bar(x=["Sebelum filter", "Sesudah filter"], y=values, marker_color=["#fb7185", "#14b8a6"], text=[f"{before:.2f} dB", f"{after:.2f} dB"], textposition="outside", textfont={"size": 14, "color": "#0f172a"}, hovertemplate="%{x}<br>SNR: %{y:.2f} dB<extra></extra>"))
-    figure.add_hline(y=TARGET_SNR_DB, line_dash="dash", line_color="#7c3aed", annotation_text=f"Target {TARGET_SNR_DB:.0f} dB", annotation_position="top left", annotation_font_color="#7c3aed")
     figure.update_layout(
         title={"text": f"Kualitas sinyal · perubahan {improvement:+.2f} dB", "x": .02, "xanchor": "left"},
         height=360, margin={"l": 26, "r": 20, "t": 62, "b": 46},
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(255,255,255,.35)", showlegend=False,
     )
-    figure.update_yaxes(title="SNR (dB)", range=[min(-5, min(values) - 3), max(max(values), TARGET_SNR_DB) + 6], gridcolor="rgba(148,163,184,.35)", zeroline=False)
+    figure.update_yaxes(title="SNR (dB)", range=[min(-5, min(values) - 3), max(values) + 5], gridcolor="rgba(148,163,184,.35)", zeroline=False)
     figure.update_xaxes(fixedrange=True)
     return figure
 
 
-# --------------------------------------------------------------------------- #
-#  Tampilan
-# --------------------------------------------------------------------------- #
 inject_css()
 st.markdown(
     """<div class="topbar"><div class="brand"><div class="brand-mark">NC</div>NoiseClean</div><div class="topbar-right">PSD Lab · Kelompok 6</div></div>
@@ -390,47 +305,31 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-METHOD_STFT = "Wiener domain frekuensi (STFT)"
-METHOD_LOCAL = "Wiener lokal (scipy.signal.wiener)"
-
 with st.sidebar:
     st.header("Control Lab")
     st.caption("Atur sumber sinyal, noise, dan metode penyaringan.")
     st.markdown('<div class="control-title">Sinyal input</div>', unsafe_allow_html=True)
-    source = st.radio("Sumber sinyal", ["Sinyal sintetis", "Contoh audio referensi", "Unggah WAV"])
+    source = st.radio("Sumber sinyal", ["Sinyal sintetis", "Unggah WAV"])
     uploaded = None
-    sample_kind = "flute"
     if source == "Sinyal sintetis":
         sample_rate = st.selectbox("Sampling rate", [8000, 16000, 44100], index=1)
         duration = st.slider("Durasi (detik)", 1.0, 10.0, 3.0, 0.5)
         frequency = st.slider("Frekuensi fundamental (Hz)", 100, 2000, 440, 10)
-    elif source == "Contoh audio referensi":
-        sample_kind = SAMPLE_KINDS[st.selectbox("Jenis contoh audio", list(SAMPLE_KINDS))]
-        sample_rate = st.selectbox("Sampling rate", [16000, 44100], index=1)
-        duration, frequency = 5.0, 440
     else:
         uploaded = st.file_uploader("File audio WAV", type=["wav"])
         sample_rate, duration, frequency = 16000, 3.0, 440
 
     st.markdown('<div class="control-title">Noise dan filter</div>', unsafe_allow_html=True)
-    noise_percent = st.slider("Level noise (% RMS sinyal)", 0, 100, 10, 1)
+    noise_percent = st.slider("Level noise (% RMS sinyal)", 0, 100, 30, 1)
     random_seed = st.number_input("Seed noise (hasil konsisten)", min_value=0, value=6, step=1)
     st.markdown('<div class="control-title">Wiener Filter</div>', unsafe_allow_html=True)
-    method = st.radio("Metode", [METHOD_STFT, METHOD_LOCAL])
-    if method == METHOD_STFT:
-        frame_size = st.select_slider("Ukuran frame STFT (sampel)", options=[512, 1024, 2048, 4096], value=4096)
-        alpha = st.slider("Kehalusan a-priori SNR (α)", 0.90, 0.995, 0.98, 0.005)
-        window = 11
-        st.caption("Frame lebih panjang → resolusi frekuensi lebih tajam, cocok untuk nada sustain. α tinggi → gain lebih halus antar-frame.")
-    else:
-        window = st.slider("Ukuran jendela Wiener (ganjil)", 3, 101, 11, 2)
-        frame_size, alpha = 4096, 0.98
-        st.caption("Wiener lokal mengestimasi noise dari statistik jendela kecil di domain waktu. Pada noise 10 % hasilnya biasanya mentok di sekitar 26 dB.")
-
+    window = st.slider("Ukuran jendela Wiener (ganjil)", 3, 101, 11, 2)
+    st.caption("Wiener Filter mengestimasi noise secara lokal. Jendela lebih besar memberi penghalusan lebih kuat.")
+    
 try:
     if source == "Unggah WAV":
         if uploaded is None:
-            st.info("Unggah file WAV dari panel kiri, atau pilih sinyal sintetis / contoh audio referensi untuk memulai.")
+            st.info("Unggah file WAV dari panel kiri, atau pilih sinyal sintetis untuk memulai.")
             st.stop()
         sample_rate, raw = wavfile.read(uploaded)
         clean_signal = to_float_audio(raw)
@@ -438,8 +337,6 @@ try:
         if clean_signal.size > maximum_samples:
             clean_signal = clean_signal[:maximum_samples]
             st.warning("Audio dibatasi hingga 30 detik agar visualisasi tetap responsif.")
-    elif source == "Contoh audio referensi":
-        clean_signal = make_sample_audio(sample_kind, sample_rate, duration)
     else:
         clean_signal = make_test_signal(sample_rate, duration, frequency)
 
@@ -447,58 +344,35 @@ try:
         st.error("Sinyal terlalu pendek untuk diproses.")
         st.stop()
     noisy_signal = add_awgn(clean_signal, noise_percent, int(random_seed))
-    if method == METHOD_STFT:
-        filtered_signal = apply_wiener_stft(noisy_signal, int(sample_rate), frame_size, alpha)
-        method_short = f"STFT {frame_size}, α={alpha:.3f}"
-    else:
-        filtered_signal = apply_wiener_local(noisy_signal, window)
-        method_short = f"jendela {window} sampel"
+    filtered_signal = apply_wiener_filter(noisy_signal, window)
 
     before = snr_db(clean_signal, noisy_signal)
     after = snr_db(clean_signal, filtered_signal)
     rmse = np.sqrt(np.mean((clean_signal - filtered_signal) ** 2))
     gain = after - before
-    gain_class = "metric-positive" if gain >= 0 else "metric-negative"
-    gain_arrow = "↑" if gain >= 0 else "↓"
     st.markdown(
         f"""<div class="metric-grid">
-          <div class="metric-card"><div class="metric-label">SAMPLING RATE</div><div class="metric-value">{int(sample_rate):,} Hz</div><div class="metric-note">Jumlah sampel audio yang dibaca setiap detik.</div></div>
+          <div class="metric-card"><div class="metric-label">SAMPLING RATE</div><div class="metric-value">{sample_rate:,} Hz</div><div class="metric-note">Jumlah sampel audio yang dibaca setiap detik.</div></div>
           <div class="metric-card"><div class="metric-label">SNR SEBELUM FILTER</div><div class="metric-value">{before:.2f} dB</div><div class="metric-note">Kualitas sinyal setelah noise ditambahkan.</div></div>
-          <div class="metric-card"><div class="metric-label">SNR SETELAH FILTER</div><div class="metric-value">{after:.2f} dB</div><div class="{gain_class}">{gain_arrow} {gain:+.2f} dB</div><div class="metric-note" style="margin-top:.38rem">Semakin tinggi nilainya, semakin bersih sinyal.</div></div>
+          <div class="metric-card"><div class="metric-label">SNR SETELAH FILTER</div><div class="metric-value">{after:.2f} dB</div><div class="metric-positive">↑ {gain:+.2f} dB</div><div class="metric-note" style="margin-top:.38rem">Semakin tinggi nilainya, semakin bersih sinyal.</div></div>
           <div class="metric-card"><div class="metric-label">RMSE HASIL FILTER</div><div class="metric-value">{rmse:.4f}</div><div class="metric-note">Rata-rata kesalahan terhadap sinyal awal; lebih kecil lebih baik.</div></div>
         </div>""",
         unsafe_allow_html=True,
     )
 
-    # ---- Pengecekan target dosen: SNR sesudah filter >= 35 dB pada noise >= 10 % ----
-    if noise_percent < TARGET_NOISE_PCT:
-        st.markdown(
-            f'<div class="target-warn"><strong>Target dosen belum diuji.</strong> Naikkan level noise ke minimal {TARGET_NOISE_PCT}% agar pengujian target SNR ≥ {TARGET_SNR_DB:.0f} dB valid.</div>',
-            unsafe_allow_html=True,
-        )
-    elif after >= TARGET_SNR_DB:
-        st.markdown(
-            f'<div class="target-ok"><strong>✓ Target tercapai.</strong> SNR setelah filter {after:.2f} dB ≥ {TARGET_SNR_DB:.0f} dB pada noise {noise_percent}% RMS.</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            f'<div class="target-warn"><strong>Target belum tercapai.</strong> SNR setelah filter {after:.2f} dB (kurang {TARGET_SNR_DB - after:.2f} dB dari {TARGET_SNR_DB:.0f} dB). '
-            f'Coba metode STFT, frame lebih panjang (2048/4096), atau sinyal tonal (sustain) dengan sampling rate lebih tinggi.</div>',
-            unsafe_allow_html=True,
-        )
-
     assessment = "meningkatkan" if gain >= 0 else "menurunkan"
+    accent = "baik" if gain >= 3 else "masih dapat dioptimalkan"
     st.markdown(
         f"""<div class="insight"><strong>Ringkasan hasil Wiener Filter.</strong> Filter {assessment} SNR sebesar <strong>{abs(gain):.2f} dB</strong>. """
-        f"Nilai SNR naik berarti keluaran filter lebih mendekati sinyal awal; nilai RMSE membantu memastikan detail sinyal tidak terlalu berubah.</div>",
+        f"Nilai SNR naik berarti keluaran filter lebih mendekati sinyal awal; nilai RMSE membantu memastikan detail sinyal tidak terlalu berubah.</div>""",
         unsafe_allow_html=True,
     )
 
-    source_name = {"Sinyal sintetis": "Sinyal sintetis", "Contoh audio referensi": "Contoh audio referensi", "Unggah WAV": "Audio WAV"}[source]
+    source_name = "Sinyal sintetis" if source == "Sinyal sintetis" else "Audio WAV"
+    window_text = f"Jendela {window} sampel"
     st.markdown(
-        f"""<div class="experiment-strip"><strong>Eksperimen aktif</strong> &nbsp; {source_name} · {int(sample_rate):,} Hz · {clean_signal.size / sample_rate:.1f} detik
-        &nbsp; | &nbsp; Noise putih {noise_percent}% RMS &nbsp; | &nbsp; {method} ({method_short})</div>""",
+        f"""<div class="experiment-strip"><strong>Eksperimen aktif</strong> &nbsp; {source_name} · {sample_rate:,} Hz · {clean_signal.size / sample_rate:.1f} detik
+        &nbsp; | &nbsp; Noise putih {noise_percent}% RMS &nbsp; | &nbsp; Wiener Filter ({window_text})</div>""",
         unsafe_allow_html=True,
     )
 
@@ -508,58 +382,43 @@ try:
         chart_left, chart_right = st.columns([1.25, 1])
         with chart_left:
             with st.container(border=True):
-                st.plotly_chart(plot_waveforms(clean_signal, noisy_signal, filtered_signal, int(sample_rate)), use_container_width=True, config={"displaylogo": False})
+                st.plotly_chart(plot_waveforms(clean_signal, noisy_signal, filtered_signal, sample_rate), use_container_width=True, config={"displaylogo": False})
         with chart_right:
             with st.container(border=True):
                 st.plotly_chart(plot_quality_comparison(before, after), use_container_width=True, config={"displaylogo": False})
         st.markdown(
             f"""<div class="info-grid">
               <div class="info-card"><div class="info-label">Objek pengujian</div><div class="info-value">{source_name}</div><div class="info-note">Referensi sinyal bersih sebelum penambahan noise.</div></div>
-              <div class="info-card"><div class="info-label">Parameter aktif</div><div class="info-value">{method_short}</div><div class="info-note">Dapat diubah dari panel Control Lab.</div></div>
+              <div class="info-card"><div class="info-label">Parameter aktif</div><div class="info-value">{window_text}</div><div class="info-note">Dapat diubah dari panel Control Lab.</div></div>
               <div class="info-card"><div class="info-label">Kesimpulan eksperimen</div><div class="info-value">SNR {gain:+.2f} dB</div><div class="info-note">{assessment.capitalize()} kualitas dibanding sinyal ber-noise.</div></div>
             </div>""",
             unsafe_allow_html=True,
         )
         st.caption("SNR dihitung terhadap sinyal awal: 10 log10(P_sinyal / P_error). Nilai lebih tinggi berarti kesalahan terhadap sinyal referensi lebih kecil.")
         with st.expander("Lihat analisis spektrum frekuensi"):
-            st.plotly_chart(plot_spectrum(clean_signal, noisy_signal, filtered_signal, int(sample_rate)), use_container_width=True, config={"displaylogo": False})
-            st.caption("Spektrum dihitung memakai FFT untuk visualisasi; metode reduksi noise dipilih dari panel Control Lab.")
+            st.plotly_chart(plot_spectrum(clean_signal, noisy_signal, filtered_signal, sample_rate), use_container_width=True, config={"displaylogo": False})
+            st.caption("Spektrum dihitung memakai FFT untuk visualisasi saja; metode reduksi noise dipilih dari panel Control Lab.")
     with tab2:
         audio1, audio2 = st.columns(2)
         with audio1:
             with st.container(border=True):
                 st.subheader("Sinyal ber-noise")
                 st.audio(wav_bytes(noisy_signal, sample_rate), format="audio/wav")
-                st.download_button("⬇️ Unduh ber-noise (WAV)", wav_bytes(noisy_signal, sample_rate), file_name="noiseclean_noisy.wav", mime="audio/wav", key="dl_noisy")
         with audio2:
             with st.container(border=True):
                 st.subheader("Hasil filter")
                 st.audio(wav_bytes(filtered_signal, sample_rate), format="audio/wav")
-                st.download_button("⬇️ Unduh hasil filter (WAV)", wav_bytes(filtered_signal, sample_rate), file_name="noiseclean_filtered.wav", mime="audio/wav", key="dl_filtered")
-        st.markdown('<div class="section-title">Contoh audio referensi (bersih)</div><div class="section-subtitle">Unduh, lalu unggah kembali lewat "Unggah WAV" untuk mencoba filter pada file sendiri.</div>', unsafe_allow_html=True)
-        sample_cols = st.columns(3)
-        for column, (label, kind) in zip(sample_cols, SAMPLE_KINDS.items()):
-            with column:
-                with st.container(border=True):
-                    st.caption(label)
-                    ref_audio = make_sample_audio(kind, 44100, 5.0)
-                    st.audio(wav_bytes(ref_audio, 44100), format="audio/wav")
-                    st.download_button("⬇️ Unduh WAV", wav_bytes(ref_audio, 44100), file_name=f"sample_{kind}_44100.wav", mime="audio/wav", key=f"dl_sample_{kind}")
+        st.download_button(
+            "⬇️ Unduh hasil WAV", wav_bytes(filtered_signal, sample_rate),
+            file_name="noiseclean_filtered.wav", mime="audio/wav",
+        )
     with tab3:
         st.subheader("Wiener Filter")
         st.latex(r"\hat{X}(f) = \frac{S_{xx}(f)}{S_{xx}(f) + S_{nn}(f)}Y(f)")
-        st.write("Wiener Filter mengestimasi sinyal bersih dari sinyal ber-noise dengan meminimalkan mean square error (MSE). Gain filter bernilai mendekati 1 di frekuensi yang didominasi sinyal dan mendekati 0 di frekuensi yang didominasi noise.")
-        st.markdown("#### Dua implementasi pada aplikasi ini")
-        st.markdown(
-            "- **Wiener lokal (domain waktu):** statistik rata-rata dan varians dihitung pada jendela kecil di sekitar tiap sampel. Sederhana, tetapi noise putih tersebar di seluruh sampel sehingga penekanannya terbatas (sekitar 26 dB pada noise 10 %).\n"
-            "- **Wiener domain frekuensi (STFT):** sinyal dipecah menjadi frame, tiap bin frekuensi diberi gain H = ξ/(1+ξ) dengan ξ = SNR a-priori. Nada murni hanya menempati sedikit bin, sedangkan noise putih tersebar di semua bin, sehingga noise di bin kosong dapat ditekan hampir seluruhnya."
-        )
-        st.latex(r"H(f,t)=\frac{\xi(f,t)}{1+\xi(f,t)},\quad \xi(f,t)=\alpha\frac{|\hat X(f,t-1)|^2}{\sigma_n^2}+(1-\alpha)\max\!\left(\frac{|Y(f,t)|^2}{\sigma_n^2}-1,0\right)")
-        st.info("Daya noise σ² diestimasi dari median spektrogram (tahan terhadap nada), bukan diambil dari nilai yang kita tambahkan sendiri, sehingga metode ini tetap masuk akal untuk audio nyata.")
+        st.write("Wiener Filter mengestimasi sinyal bersih dari sinyal ber-noise dengan meminimalkan mean square error (MSE). Pada aplikasi ini, estimasi dilakukan secara lokal menggunakan ukuran jendela yang dipilih.")
+        st.info("Untuk eksperimen yang adil, pertahankan seed noise yang sama saat mengganti level noise atau ukuran jendela.")
         st.markdown("#### Cara membaca hasil")
-        st.markdown("- **Domain waktu:** lihat apakah garis hijau mengikuti garis biru dan menjauh dari garis merah.\n- **Spektrum frekuensi:** noise menaikkan lantai energi di semua frekuensi; Wiener STFT menurunkan lantai itu kembali, sementara puncak nada tetap.\n- **SNR dan RMSE:** ubah level noise, ukuran frame, atau sampling rate, lalu bandingkan hasil antar-pengujian.")
-        st.markdown("#### Batasan yang perlu dijelaskan saat presentasi")
-        st.markdown("- Peningkatan SNR bergantung pada **kesparsan spektrum sinyal**. Nada sustain (flute, organ, dial tone) mudah melewati 35 dB; melodi cepat atau suara ucapan penuh transien jauh lebih sulit.\n- SNR dihitung terhadap sinyal awal yang dianggap bersih. Jika file WAV yang diunggah sudah mengandung noise bawaan, angka SNR akan terbatas oleh noise tersebut.")
+        st.markdown("- **Domain waktu:** lihat apakah garis hijau mengikuti garis biru dan menjauh dari garis merah.\n- **Spektrum frekuensi:** noise biasanya menaikkan energi di banyak frekuensi; Wiener Filter menekan komponen noise berdasarkan estimasi lokal.\n- **SNR dan RMSE:** ubah level noise atau ukuran jendela, lalu bandingkan hasil antar-pengujian.")
 except Exception as error:
     st.error(f"Tidak dapat memproses sinyal: {error}")
     st.exception(error)
